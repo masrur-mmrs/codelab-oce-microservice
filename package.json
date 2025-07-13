@@ -1,0 +1,36 @@
+{
+  "name": "online-code-execution-service",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "scripts": {
+    "dev": "ts-node-dev src/index.ts",
+    "build": "tsc",
+    "start": "yarn build && node dist/index.js",
+    "test:client": "tsx ./src/tests/client.ts",
+    "test:client:rest": "tsx ./src/tests/client.ts rest",
+    "test:client:ws": "tsx ./src/tests/client.ts ws",
+    "test:client:interactive": "tsx ./src/tests/client.ts interactive",
+    "test:client:system": "tsx ./src/tests/client.ts system"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.7",
+    "express": "^5.1.0",
+    "form-data": "^4.0.3",
+    "multer": "^2.0.1",
+    "node-fetch": "^3.3.2",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^3.3.42",
+    "@types/express": "^5.0.3",
+    "@types/form-data": "^2.5.2",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.0.13",
+    "@types/tar-fs": "^2.0.4",
+    "@types/ws": "^8.18.1",
+    "ts-node-dev": "^2.0.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

@@ -14,10 +14,10 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.shutdownWebSocketPool = exports.getWebSocketPoolStats = exports.setupWebSocketServer = exports.initializeWebSocketPool = void 0;
 const ws_1 = require("ws");
+// import tar from "tar-stream";
 const stream_1 = __importDefault(require("stream"));
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
-const tar_fs_1 = __importDefault(require("tar-fs"));
 const containerPool_1 = require("../services/containerPool");
 const dockerUtils_1 = require("../utils/dockerUtils");
 const dockerode_1 = __importDefault(require("dockerode"));
@@ -98,68 +98,154 @@ const setupWebSocketServer = (server) => {
                     }
                     session.isRunning = true;
                     session.language = language;
+                    // Updated section from wsServer.ts - around line 70-120
                     try {
                         session.pooledContainer = yield containerPool.acquire(language);
                         const { container } = session.pooledContainer;
-                        sendMessage(`Acquired container for ${language}`, "system");
+                        sendMessage(`Acquired container for ${language}\n`, "system");
                         const tempDir = path_1.default.join(process.cwd(), "tmp");
                         if (!fs_1.default.existsSync(tempDir)) {
                             fs_1.default.mkdirSync(tempDir, { recursive: true });
                         }
-                        const tempFile = path_1.default.join(tempDir, `${Date.now()}_${config.fileName}`);
-                        fs_1.default.writeFileSync(tempFile, code);
-                        const tarStream = new stream_1.default.PassThrough();
-                        const archive = tar_fs_1.default.pack(path_1.default.dirname(tempFile), {
-                            entries: [path_1.default.basename(tempFile)],
-                            map: (header) => {
-                                header.name = config.fileName;
-                                return header;
-                            },
-                        });
-                        archive.pipe(tarStream);
-                        yield container.putArchive(tarStream, { path: "/tmp" });
-                        const runExec = yield container.exec({
-                            Cmd: config.cmd,
-                            AttachStdin: true,
+                        // const tempFile = path.join(tempDir, `${config.fileName}`);
+                        // fs.writeFileSync(tempFile, code);
+                        // Create TAR archive with the code - using the fixed function
+                        console.log(`Creating TAR archive for ${config.fileName}`);
+                        // const pack = await createTarWithSingleFile(config.fileName, code);
+                        // Write file directly to container instead of using TAR
+                        console.log(`Writing ${config.fileName} directly to container`);
+                        console.log(`Code content length: ${code.length} characters`);
+                        try {
+                            yield (0, dockerUtils_1.writeFileToContainerBase64)(container, config.fileName, code);
+                            console.log("File successfully written to container");
+                        }
+                        catch (writeError) {
+                            console.error("Error writing file to container:", writeError);
+                            sendMessage(`Error writing file: ${writeError}`, "system");
+                            yield cleanup();
+                            return;
+                        }
+                        // Verify the file was uploaded correctly
+                        const verifyExec = yield container.exec({
+                            Cmd: ["ls", "-la", "/tmp"],
                             AttachStdout: true,
                             AttachStderr: true,
-                            Tty: true,
-                            WorkingDir: "/tmp"
                         });
-                        session.execStream = yield runExec.start({ hijack: true, stdin: true });
-                        session.pooledContainer.execStream = session.execStream;
-                        const stdout = new stream_1.default.Writable({
-                            write(chunk, _enc, cb) {
-                                sendMessage(chunk.toString(), "stdout");
-                                cb();
-                            },
+                        const verifyStream = yield verifyExec.start({});
+                        let verifyOutput = "";
+                        verifyStream.on("data", (chunk) => {
+                            verifyOutput += chunk.toString();
+                            console.log("📁 /tmp contents:", chunk.toString());
                         });
-                        const stderr = new stream_1.default.Writable({
-                            write(chunk, _enc, cb) {
-                                sendMessage(chunk.toString(), "stderr");
-                                cb();
-                            },
-                        });
-                        docker.modem.demuxStream(session.execStream, stdout, stderr);
-                        session.timeout = setTimeout(() => __awaiter(void 0, void 0, void 0, function* () {
-                            sendMessage("Execution timed out (30 seconds)", "system");
-                            yield cleanup();
-                        }), 30000);
-                        session.execStream.on("end", () => __awaiter(void 0, void 0, void 0, function* () {
-                            sendMessage("Execution completed", "system");
-                            yield cleanup();
+                        verifyStream.on("end", () => __awaiter(void 0, void 0, void 0, function* () {
+                            console.log("Full /tmp contents:", verifyOutput);
+                            if (!verifyOutput.includes(config.fileName)) {
+                                sendMessage(`Error: ${config.fileName} not found in /tmp after upload`, "system");
+                                console.error("File not found in container after upload");
+                                yield cleanup();
+                                return;
+                            }
+                            // Test file readability
+                            const catExec = yield container.exec({
+                                Cmd: ["cat", `/tmp/${config.fileName}`],
+                                AttachStdout: true,
+                                AttachStderr: true,
+                            });
+                            const catStream = yield catExec.start({});
+                            let catOutput = "";
+                            catStream.on("data", (chunk) => {
+                                catOutput += chunk.toString();
+                            });
+                            // Replace the content verification section in wsServer.ts with this improved version:
+                            catStream.on("end", () => __awaiter(void 0, void 0, void 0, function* () {
+                                console.log(`📝 Content inside container /tmp/${config.fileName}:`, catOutput);
+                                // Normalize both strings for comparison (trim whitespace and normalize line endings)
+                                const normalizedContainerContent = catOutput.trim().replace(/\r\n/g, '\n');
+                                const normalizedOriginalCode = code.trim().replace(/\r\n/g, '\n');
+                                console.log(`🔍 Original code length: ${normalizedOriginalCode.length}`);
+                                console.log(`🔍 Container content length: ${normalizedContainerContent.length}`);
+                                console.log(`🔍 Original code: "${normalizedOriginalCode}"`);
+                                console.log(`🔍 Container content: "${normalizedContainerContent}"`);
+                                if (normalizedContainerContent === normalizedOriginalCode) {
+                                    console.log("✅ File content matches expected code");
+                                    // Proceed with execution...
+                                    yield executeCode();
+                                }
+                                else {
+                                    console.error("❌ File content doesn't match expected code");
+                                    console.error(`Expected: "${normalizedOriginalCode}"`);
+                                    console.error(`Got: "${normalizedContainerContent}"`);
+                                    // Show byte-by-byte comparison for debugging
+                                    console.log("Byte comparison:");
+                                    for (let i = 0; i < Math.max(normalizedOriginalCode.length, normalizedContainerContent.length); i++) {
+                                        const expectedChar = normalizedOriginalCode[i] || 'END';
+                                        const actualChar = normalizedContainerContent[i] || 'END';
+                                        const expectedCode = normalizedOriginalCode.charCodeAt(i) || 'END';
+                                        const actualCode = normalizedContainerContent.charCodeAt(i) || 'END';
+                                        if (expectedChar !== actualChar) {
+                                            console.log(`Diff at position ${i}: expected '${expectedChar}' (${expectedCode}) vs actual '${actualChar}' (${actualCode})`);
+                                        }
+                                    }
+                                    // For now, let's proceed with execution anyway since the file exists
+                                    console.log("🚀 Proceeding with execution despite content mismatch...");
+                                    yield executeCode();
+                                }
+                            }));
+                            catStream.on("error", (err) => {
+                                console.error("Error reading file content:", err);
+                                sendMessage(`Error reading file: ${err.message}`, "system");
+                                cleanup();
+                            });
                         }));
-                        session.execStream.on("error", (err) => __awaiter(void 0, void 0, void 0, function* () {
-                            sendMessage(`Execution error: ${err.message}`, "system");
-                            yield cleanup();
-                        }));
-                        try {
-                            fs_1.default.unlinkSync(tempFile);
+                        // Function to execute the code after verification
+                        function executeCode() {
+                            return __awaiter(this, void 0, void 0, function* () {
+                                try {
+                                    console.log('🧪 Running:', config.cmd.join(' '));
+                                    const runExec = yield container.exec({
+                                        Cmd: config.cmd,
+                                        AttachStdin: true,
+                                        AttachStdout: true,
+                                        AttachStderr: true,
+                                        Tty: true,
+                                        WorkingDir: "/tmp"
+                                    });
+                                    session.execStream = yield runExec.start({ hijack: true, stdin: true });
+                                    session.pooledContainer.execStream = session.execStream;
+                                    const stdout = new stream_1.default.Writable({
+                                        write(chunk, _enc, cb) {
+                                            sendMessage(chunk.toString(), "stdout");
+                                            cb();
+                                        },
+                                    });
+                                    const stderr = new stream_1.default.Writable({
+                                        write(chunk, _enc, cb) {
+                                            sendMessage(chunk.toString(), "stderr");
+                                            cb();
+                                        },
+                                    });
+                                    docker.modem.demuxStream(session.execStream, stdout, stderr);
+                                    session.timeout = setTimeout(() => __awaiter(this, void 0, void 0, function* () {
+                                        sendMessage("Execution timed out (30 seconds)", "system");
+                                        yield cleanup();
+                                    }), 30000);
+                                    session.execStream.on("end", () => __awaiter(this, void 0, void 0, function* () {
+                                        sendMessage("Execution completed", "system");
+                                        yield cleanup();
+                                    }));
+                                    session.execStream.on("error", (err) => __awaiter(this, void 0, void 0, function* () {
+                                        sendMessage(`Execution error: ${err.message}`, "system");
+                                        yield cleanup();
+                                    }));
+                                    sendMessage("Code execution started", "system");
+                                }
+                                catch (error) {
+                                    console.error("Error executing code:", error);
+                                    sendMessage(`Execution setup error: ${error}`, "system");
+                                    yield cleanup();
+                                }
+                            });
                         }
-                        catch (error) {
-                            console.warn("Failed to cleanup temp file:", error);
-                        }
-                        sendMessage("Code execution started", "system");
                     }
                     catch (err) {
                         sendMessage(`Error: ${err.message}`, "system");

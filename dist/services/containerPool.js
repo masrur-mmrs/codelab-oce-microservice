@@ -102,7 +102,7 @@ class ContainerPool extends events_1.EventEmitter {
                     CpuPeriod: 100000,
                     CpuQuota: 50000,
                     NetworkMode: "none",
-                    ReadonlyRootfs: true,
+                    ReadonlyRootfs: false,
                     Tmpfs: {
                         "/tmp": "rw,noexec,nosuid,size=100m"
                     },

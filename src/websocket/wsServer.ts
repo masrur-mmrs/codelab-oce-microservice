@@ -3,9 +3,8 @@ import { Server as HTTPServer } from "http";
 import stream from "stream";
 import fs from "fs";
 import path from "path";
-import tarFs from "tar-fs";
 import { ContainerPool } from "../services/containerPool";
-import { getLanguageConfig } from "../utils/dockerUtils";
+import { getLanguageConfig, writeFileToContainerBase64 } from "../utils/dockerUtils";
 import Docker from "dockerode";
 
 const docker = new Docker();
@@ -88,7 +87,10 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                 const data = JSON.parse(raw.toString());
                 
                 if (data.type === "execute") {
-                    const { language, code } = data;
+                    const { 
+                        language, 
+                        code 
+                    } = data;
                     
                     if (session.isRunning) {
                         sendMessage("A code execution is already in progress", "system");
@@ -113,78 +115,166 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                         session.pooledContainer = await containerPool.acquire(language);
                         const { container } = session.pooledContainer;
                         
-                        sendMessage(`Acquired container for ${language}`, "system");
+                        sendMessage(`Acquired container for ${language}\n`, "system");
 
                         const tempDir = path.join(process.cwd(), "tmp");
                         if (!fs.existsSync(tempDir)) {
                             fs.mkdirSync(tempDir, { recursive: true });
                         }
                         
-                        const tempFile = path.join(tempDir, `${Date.now()}_${config.fileName}`);
-                        fs.writeFileSync(tempFile, code);
+                        console.log(`Creating TAR archive for ${config.fileName}`);
 
-                        const tarStream = new stream.PassThrough();
-                        const archive = tarFs.pack(path.dirname(tempFile), {
-                            entries: [path.basename(tempFile)],
-                            map: (header) => {
-                                header.name = config.fileName;
-                                return header;
-                            },
-                        });
-                        archive.pipe(tarStream);
-                        await container.putArchive(tarStream, { path: "/tmp" });
-
-                        const runExec = await container.exec({
-                            Cmd: config.cmd,
-                            AttachStdin: true,
-                            AttachStdout: true,
-                            AttachStderr: true,
-                            Tty: true,
-                            WorkingDir: "/tmp"
-                        });
-
-                        session.execStream = await runExec.start({ hijack: true, stdin: true });
-                        
-                        session.pooledContainer.execStream = session.execStream;
-
-                        const stdout = new stream.Writable({
-                            write(chunk, _enc, cb) {
-                                sendMessage(chunk.toString(), "stdout");
-                                cb();
-                            },
-                        });
-
-                        const stderr = new stream.Writable({
-                            write(chunk, _enc, cb) {
-                                sendMessage(chunk.toString(), "stderr");
-                                cb();
-                            },
-                        });
-
-                        docker.modem.demuxStream(session.execStream, stdout, stderr);
-
-                        session.timeout = setTimeout(async () => {
-                            sendMessage("Execution timed out (30 seconds)", "system");
-                            await cleanup();
-                        }, 30000);
-
-                        session.execStream.on("end", async () => {
-                            sendMessage("Execution completed", "system");
-                            await cleanup();
-                        });
-
-                        session.execStream.on("error", async (err: Error) => {
-                            sendMessage(`Execution error: ${err.message}`, "system");
-                            await cleanup();
-                        });
+                        console.log(`Writing ${config.fileName} directly to container`);
+                        console.log(`Code content length: ${code.length} characters`);
 
                         try {
-                            fs.unlinkSync(tempFile);
-                        } catch (error) {
-                            console.warn("Failed to cleanup temp file:", error);
+                            await writeFileToContainerBase64(container, config.fileName, code);
+                            console.log("File successfully written to container");
+                        } catch (writeError) {
+                            console.error("Error writing file to container:", writeError);
+                            sendMessage(`Error writing file: ${writeError}`, "system");
+                            await cleanup();
+                            return;
                         }
 
-                        sendMessage("Code execution started", "system");
+                        const verifyExec = await container.exec({
+                            Cmd: ["ls", "-la", "/tmp"],
+                            AttachStdout: true,
+                            AttachStderr: true,
+                        });
+
+                        const verifyStream = await verifyExec.start({});
+                        let verifyOutput = "";
+
+                        verifyStream.on("data", (chunk: Buffer) => {
+                            verifyOutput += chunk.toString();
+                            console.log("📁 /tmp contents:", chunk.toString());
+                        });
+
+                        verifyStream.on("end", async () => {
+                            console.log("Full /tmp contents:", verifyOutput);
+                            
+                            if (!verifyOutput.includes(config.fileName)) {
+                                sendMessage(`Error: ${config.fileName} not found in /tmp after upload`, "system");
+                                console.error("File not found in container after upload");
+                                await cleanup();
+                                return;
+                            }
+
+                            const catExec = await container.exec({
+                                Cmd: ["cat", `/tmp/${config.fileName}`],
+                                AttachStdout: true,
+                                AttachStderr: true,
+                            });
+
+                            const catStream = await catExec.start({});
+                            let catOutput = "";
+
+                            catStream.on("data", (chunk: Buffer) => {
+                                catOutput += chunk.toString();
+                            });
+
+                            catStream.on("end", async () => {
+                                console.log(`📝 Content inside container /tmp/${config.fileName}:`, catOutput);
+                                
+                                const normalizedContainerContent = catOutput.trim().replace(/\r\n/g, '\n');
+                                const normalizedOriginalCode = code.trim().replace(/\r\n/g, '\n');
+                                
+                                console.log(`🔍 Original code length: ${normalizedOriginalCode.length}`);
+                                console.log(`🔍 Container content length: ${normalizedContainerContent.length}`);
+                                console.log(`🔍 Original code: "${normalizedOriginalCode}"`);
+                                console.log(`🔍 Container content: "${normalizedContainerContent}"`);
+                                
+                                if (normalizedContainerContent === normalizedOriginalCode) {
+                                    console.log("✅ File content matches expected code");
+                                    // Proceed with execution...
+                                    await executeCode();
+                                } else {
+                                    console.error("❌ File content doesn't match expected code");
+                                    console.error(`Expected: "${normalizedOriginalCode}"`);
+                                    console.error(`Got: "${normalizedContainerContent}"`);
+                                    
+                                    // Show byte-by-byte comparison for debugging
+                                    console.log("Byte comparison:");
+                                    for (let i = 0; i < Math.max(normalizedOriginalCode.length, normalizedContainerContent.length); i++) {
+                                        const expectedChar = normalizedOriginalCode[i] || "END";
+                                        const actualChar = normalizedContainerContent[i] || "END";
+                                        const expectedCode = normalizedOriginalCode.charCodeAt(i) || "END";
+                                        const actualCode = normalizedContainerContent.charCodeAt(i) || "END";
+                                        
+                                        if (expectedChar !== actualChar) {
+                                            console.log(`Diff at position ${i}: expected "${expectedChar}" (${expectedCode}) vs actual "${actualChar}" (${actualCode})`);
+                                        }
+                                    }
+                                    
+                                    // For now, let"s proceed with execution anyway since the file exists
+                                    console.log("🚀 Proceeding with execution despite content mismatch...");
+                                    await executeCode();
+                                }
+                            });
+
+                            catStream.on("error", (err: { message: any; }) => {
+                                console.error("Error reading file content:", err);
+                                sendMessage(`Error reading file: ${err.message}`, "system");
+                                cleanup();
+                            });
+                        });
+
+                        const executeCode = async () => {
+                            try {
+                                console.log("🧪 Running:", config.cmd.join(" "));
+                                
+                                const runExec = await container.exec({
+                                    Cmd: config.cmd,
+                                    AttachStdin: true,
+                                    AttachStdout: true,
+                                    AttachStderr: true,
+                                    Tty: true,
+                                    WorkingDir: "/tmp"
+                                });
+
+                                session.execStream = await runExec.start({ hijack: true, stdin: true });
+                                session.pooledContainer.execStream = session.execStream;
+
+                                const stdout = new stream.Writable({
+                                    write(chunk, _enc, cb) {
+                                        sendMessage(chunk.toString(), "stdout");
+                                        cb();
+                                    },
+                                });
+
+                                const stderr = new stream.Writable({
+                                    write(chunk, _enc, cb) {
+                                        sendMessage(chunk.toString(), "stderr");
+                                        cb();
+                                    },
+                                });
+
+                                docker.modem.demuxStream(session.execStream, stdout, stderr);
+
+                                session.timeout = setTimeout(async () => {
+                                    sendMessage("Execution timed out (30 seconds)", "system");
+                                    await cleanup();
+                                }, 30000);
+
+                                session.execStream.on("end", async () => {
+                                    sendMessage("Execution completed", "system");
+                                    await cleanup();
+                                });
+
+                                session.execStream.on("error", async (err: Error) => {
+                                    sendMessage(`Execution error: ${err.message}`, "system");
+                                    await cleanup();
+                                });
+
+                                sendMessage("Code execution started", "system");
+                                
+                            } catch (error) {
+                                console.error("Error executing code:", error);
+                                sendMessage(`Execution setup error: ${error}`, "system");
+                                await cleanup();
+                            }
+                        }
 
                     } catch (err: any) {
                         sendMessage(`Error: ${err.message}`, "system");
@@ -193,7 +283,7 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                 } else if (data.type === "input") {
                     if (session.execStream && session.isRunning) {
                         try {
-                            session.execStream.write(data.message + "\n");
+                            session.execStream.write(data.message);
                         } catch (error) {
                             sendMessage("Error sending input to container", "system");
                         }

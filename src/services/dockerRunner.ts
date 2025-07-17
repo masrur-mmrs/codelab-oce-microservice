@@ -1,10 +1,9 @@
 import Docker from "dockerode";
 import path from "path";
-import stream, { Writable } from "stream";
+import { Writable } from "stream";
 import fs from "fs";
-import type { Pack } from "tar-fs";
 import { ContainerPool } from "./containerPool";
-import { getLanguageConfig } from "../utils/dockerUtils";
+import { getLanguageConfig, execInContainer, writeFileToContainerBase64 } from "../utils/dockerUtils";
 
 const docker = new Docker();
 
@@ -77,17 +76,58 @@ export const runCodeInDocker = async (
         pooledContainer = await containerPool.acquire(language);
         const { container } = pooledContainer;
         
-        const tarStream = new stream.PassThrough();
-        const fileName = path.basename(filePath);
-        const archive: Pack = require("tar-fs").pack(path.dirname(filePath), {
-            entries: [fileName],
-            map: (header: { name: string }) => {
-                header.name = config.fileName;
-                return header;
-            },
+        if (!fs.existsSync(filePath)) {
+            console.error("[ERROR] Code file not found:", filePath);
+            throw new Error(`Code file not found: ${filePath}`);
+        }
+        
+        const fileContent = fs.readFileSync(filePath, "utf8");
+
+        console.log("[DEBUG] filePath:", filePath);
+        console.log("[DEBUG] filename:", config.fileName);
+        console.log("[DEBUG] content length:", fileContent.length);
+
+        await writeFileToContainerBase64(container, config.fileName, fileContent);
+
+        console.log("[DEBUG] Archive uploaded successfully");
+
+        const catExec = await container.exec({
+            Cmd: ["cat", `/tmp/${config.fileName}`],
+            AttachStdout: true,
+            AttachStderr: true,
         });
-        archive.pipe(tarStream);
-        await container.putArchive(tarStream, { path: "/tmp" });
+        const catStream = await catExec.start({});
+        catStream.on("data", (chunk: { toString: () => any; }) => {
+            console.log(`📝 Content inside container /tmp/${config.fileName}:`, chunk.toString());
+        });
+        
+        await execInContainer(container, ["touch", "/tmp/hello.txt"]);
+        await execInContainer(container, ["ls", "-lh", "/tmp"]);
+
+        const { output: lsOutput } = await execInContainer(container, ["ls", "-lh", "/tmp"]);
+        console.log("[DEBUG] /tmp contents:", lsOutput);
+
+
+        if (!lsOutput.includes(config.fileName)) {
+            throw new Error(`File ${config.fileName} not found in container after upload`);
+        }
+
+        console.log("🧪 Running:", config.cmd.join(" "));
+
+        await execInContainer(container, ["ls", "-lh", "/tmp"]);
+
+        const debugExec = await container.exec({
+            Cmd: ["ls", "-l", "/tmp"],
+            AttachStdout: true,
+            AttachStderr: true
+        });
+        const debugStream = await debugExec.start();
+
+        debugStream.on("data", (chunk: { toString: () => any; }) => {
+            console.log("[/tmp contents]", chunk.toString());
+        });
+
+        console.log("🧪 Running:", config.cmd.join(" "));
 
         const exec = await container.exec({
             Cmd: config.cmd,
@@ -207,19 +247,35 @@ export const createInteractiveContainer = async (
         fs.mkdirSync(tempDir, { recursive: true });
     }
     
-    const tempFile = path.join(tempDir, `${Date.now()}_${config.fileName}`);
-    fs.writeFileSync(tempFile, code);
+    const tempFile = path.join(tempDir, `${config.fileName}`);
 
-    const tarStream = new stream.PassThrough();
-    const archive = require("tar-fs").pack(path.dirname(tempFile), {
-        entries: [path.basename(tempFile)],
-        map: (header: { name: string }) => {
-            header.name = config.fileName;
-            return header;
-        },
+    if (!fs.existsSync(tempFile)) {
+        throw new Error(`Code file not found: ${tempFile}`);
+    }
+
+    console.log("[DEBUG] Putting archive to /tmp");
+    await writeFileToContainerBase64(container, config.fileName, code);
+    console.log("[DEBUG] Archive put complete");
+
+    const { output: lsOutput } = await execInContainer(container, ["ls", "-l", "/tmp"]);
+    console.log("[DEBUG] /tmp contents:", lsOutput);
+
+    if (!lsOutput.includes(config.fileName)) {
+        throw new Error(`File ${config.fileName} not found in container after upload`);
+    }
+
+    const debugExec = await container.exec({
+        Cmd: ["ls", "-l", "/tmp"],
+        AttachStdout: true,
+        AttachStderr: true
     });
-    archive.pipe(tarStream);
-    await container.putArchive(tarStream, { path: "/tmp" });
+    const debugStream = await debugExec.start({});
+
+    debugStream.on("data", (chunk: Buffer) => {
+        console.log("[/tmp contents]", chunk.toString());
+    });
+
+    console.log("🧪 Running:", config.cmd.join(" "));
 
     const runExec = await container.exec({
         Cmd: config.cmd,

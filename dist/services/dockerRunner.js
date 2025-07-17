@@ -1,37 +1,4 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -48,7 +15,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.createInteractiveContainer = exports.runCodeInDocker = exports.shutdownContainerPool = exports.getPoolStats = exports.initializeContainerPool = void 0;
 const dockerode_1 = __importDefault(require("dockerode"));
 const path_1 = __importDefault(require("path"));
-const stream_1 = __importStar(require("stream"));
+const stream_1 = require("stream");
 const fs_1 = __importDefault(require("fs"));
 const containerPool_1 = require("./containerPool");
 const dockerUtils_1 = require("../utils/dockerUtils");
@@ -97,17 +64,47 @@ const runCodeInDocker = (filePath_1, input_1, language_1, ...args_1) => __awaite
     try {
         pooledContainer = yield containerPool.acquire(language);
         const { container } = pooledContainer;
-        const tarStream = new stream_1.default.PassThrough();
-        const fileName = path_1.default.basename(filePath);
-        const archive = require("tar-fs").pack(path_1.default.dirname(filePath), {
-            entries: [fileName],
-            map: (header) => {
-                header.name = config.fileName;
-                return header;
-            },
+        if (!fs_1.default.existsSync(filePath)) {
+            console.error("[ERROR] Code file not found:", filePath);
+            throw new Error(`Code file not found: ${filePath}`);
+        }
+        const fileContent = fs_1.default.readFileSync(filePath, 'utf8');
+        // const archive = createTarWithSingleFile(config.fileName, fileContent);
+        console.log("[DEBUG] filePath:", filePath);
+        console.log("[DEBUG] filename:", config.fileName);
+        console.log("[DEBUG] content length:", fileContent.length);
+        // await container.putArchive(archive, { path: "/tmp" });
+        yield (0, dockerUtils_1.writeFileToContainerBase64)(container, config.fileName, fileContent);
+        console.log("[DEBUG] Archive uploaded successfully");
+        const catExec = yield container.exec({
+            Cmd: ["cat", `/tmp/${config.fileName}`],
+            AttachStdout: true,
+            AttachStderr: true,
         });
-        archive.pipe(tarStream);
-        yield container.putArchive(tarStream, { path: "/tmp" });
+        const catStream = yield catExec.start({});
+        catStream.on("data", (chunk) => {
+            console.log(`📝 Content inside container /tmp/${config.fileName}:`, chunk.toString());
+        });
+        yield (0, dockerUtils_1.execInContainer)(container, ["touch", "/tmp/hello.txt"]);
+        yield (0, dockerUtils_1.execInContainer)(container, ["ls", "-lh", "/tmp"]);
+        // Verify file exists
+        const { output: lsOutput } = yield (0, dockerUtils_1.execInContainer)(container, ["ls", "-lh", "/tmp"]);
+        console.log("[DEBUG] /tmp contents:", lsOutput);
+        if (!lsOutput.includes(config.fileName)) {
+            throw new Error(`File ${config.fileName} not found in container after upload`);
+        }
+        console.log('🧪 Running:', config.cmd.join(' '));
+        yield (0, dockerUtils_1.execInContainer)(container, ["ls", "-lh", "/tmp"]);
+        const debugExec = yield container.exec({
+            Cmd: ['ls', '-l', '/tmp'],
+            AttachStdout: true,
+            AttachStderr: true
+        });
+        const debugStream = yield debugExec.start();
+        debugStream.on('data', (chunk) => {
+            console.log('[/tmp contents]', chunk.toString());
+        });
+        console.log('🧪 Running:', config.cmd.join(' '));
         const exec = yield container.exec({
             Cmd: config.cmd,
             AttachStdin: true,
@@ -205,18 +202,33 @@ const createInteractiveContainer = (code, language) => __awaiter(void 0, void 0,
     if (!fs_1.default.existsSync(tempDir)) {
         fs_1.default.mkdirSync(tempDir, { recursive: true });
     }
-    const tempFile = path_1.default.join(tempDir, `${Date.now()}_${config.fileName}`);
-    fs_1.default.writeFileSync(tempFile, code);
-    const tarStream = new stream_1.default.PassThrough();
-    const archive = require("tar-fs").pack(path_1.default.dirname(tempFile), {
-        entries: [path_1.default.basename(tempFile)],
-        map: (header) => {
-            header.name = config.fileName;
-            return header;
-        },
+    const tempFile = path_1.default.join(tempDir, `${config.fileName}`);
+    // fs.writeFileSync(tempFile, code);
+    if (!fs_1.default.existsSync(tempFile)) {
+        throw new Error(`Code file not found: ${tempFile}`);
+    }
+    // const archive = await createTarWithSingleFile(config.fileName, code);
+    // archive.pipe(tarStream);
+    console.log("[DEBUG] Putting archive to /tmp");
+    // await container.putArchive(archive, { path: "/tmp" });
+    yield (0, dockerUtils_1.writeFileToContainerBase64)(container, config.fileName, code);
+    console.log("[DEBUG] Archive put complete");
+    // Verify file exists
+    const { output: lsOutput } = yield (0, dockerUtils_1.execInContainer)(container, ["ls", "-l", "/tmp"]);
+    console.log('[DEBUG] /tmp contents:', lsOutput);
+    if (!lsOutput.includes(config.fileName)) {
+        throw new Error(`File ${config.fileName} not found in container after upload`);
+    }
+    const debugExec = yield container.exec({
+        Cmd: ['ls', '-l', '/tmp'],
+        AttachStdout: true,
+        AttachStderr: true
     });
-    archive.pipe(tarStream);
-    yield container.putArchive(tarStream, { path: "/tmp" });
+    const debugStream = yield debugExec.start({});
+    debugStream.on('data', (chunk) => {
+        console.log('[/tmp contents]', chunk.toString());
+    });
+    console.log('🧪 Running:', config.cmd.join(' '));
     const runExec = yield container.exec({
         Cmd: config.cmd,
         AttachStdin: true,

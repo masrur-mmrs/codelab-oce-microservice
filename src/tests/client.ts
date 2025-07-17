@@ -62,16 +62,16 @@ async function testWebSocket() {
             
             // Send code execution request
             const jsCode = `
-console.log("Hello from JavaScript!");
-console.log("Current time:", new Date().toISOString());
+                console.log("Hello from JavaScript!");
+                console.log("Current time:", new Date().toISOString());
 
-// Simulate some processing
-for (let i = 0; i < 5; i++) {
-    console.log(\`Processing step \${i + 1}\`);
-}
+                // Simulate some processing
+                for (let i = 0; i < 5; i++) {
+                    console.log(\`Processing step \${i + 1}\`);
+                }
 
-console.log("Finished processing!");
-`;
+                console.log("Finished processing!");
+                `;
             
             ws.send(JSON.stringify({
                 type: 'execute',

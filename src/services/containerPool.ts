@@ -43,6 +43,65 @@ export class ContainerPool extends EventEmitter {
         }, 60000);
     }
 
+    public async getPools(): Promise<Map<string, PooledContainer[]>> {
+        return this.pools;
+    }
+
+    // Add this method to your ContainerPool class
+    public async forceRelease(pooledContainer: any): Promise<void> {
+        try {
+            const language = pooledContainer.language;
+            const pool = this.pools.get(language);
+            
+            if (!pool) {
+                console.error(`No pool found for language: ${language}`);
+                return;
+            }
+            
+            // Find the container in the pool
+            const containerIndex = pool.findIndex(
+                (pc: any) => pc.container.id === pooledContainer.container.id && !pc.inUse
+            );
+            
+            if (containerIndex !== -1) {
+                // Container is already available, just mark it properly
+                pool[containerIndex].inUse = false;
+                pool[containerIndex].lastUsed = Date.now();
+                console.log(`Container already in available pool, marked as free`);
+                return;
+            }
+            
+            // Check if it's in use
+            const inUseIndex = pool.findIndex(
+                (pc: any) => pc.container.id === pooledContainer.container.id && pc.inUse
+            );
+            
+            if (inUseIndex !== -1) {
+                // Mark as not in use
+                pool[inUseIndex].inUse = false;
+                pool[inUseIndex].lastUsed = Date.now();
+                console.log(`Moved container from inUse to available pool`);
+                return;
+            }
+            
+            // Container not found in pool - this is problematic
+            console.error(`Container not found in any pool, it may be leaked`);
+            
+            // Optionally, try to stop/remove the container entirely
+            try {
+                await pooledContainer.container.stop({ t: 1 });
+                await pooledContainer.container.remove({ force: true });
+                console.log(`Removed leaked container`);
+            } catch (removeError) {
+                console.error(`Failed to remove leaked container:`, removeError);
+            }
+            
+        } catch (error) {
+            console.error(`Force release failed:`, error);
+            throw error;
+        }
+    }
+
     async preloadImages(): Promise<void> {
         const supportedLanguages = ["python", "javascript", "c", "cpp", "java", "go", "rust"];
         

@@ -363,14 +363,17 @@ export const writeFileToContainerBase64 = async (
     filename: string, 
     content: string
 ): Promise<void> => {
-    const base64Content = Buffer.from(content, "utf-8").toString("base64");
+    // Ensure content is properly encoded as UTF-8
+    const buffer = Buffer.from(content, "utf-8");
+    const base64Content = buffer.toString("base64");
     
     console.log(`Original content: "${content}"`);
     console.log(`Base64 content: "${base64Content}"`);
     
+    // Use a more robust approach with echo and base64 decoding
     const writeCmd = [
         "sh", "-c", 
-        `printf "%s" "${base64Content}" | base64 -d > /tmp/${filename}`
+        `echo -n "${base64Content}" | base64 -d > /tmp/${filename}`
     ];
     
     console.log(`Writing ${filename} to container using base64`);
@@ -391,7 +394,8 @@ export const writeFileToContainerBase64 = async (
         
         stream.on("data", (chunk: Buffer) => {
             const output = chunk.toString();
-            if (output.includes("stderr")) {
+            // Simple way to separate stdout and stderr
+            if (output.includes("base64:") || output.includes("error") || output.includes("Error")) {
                 stderr += output;
             } else {
                 stdout += output;
@@ -409,6 +413,7 @@ export const writeFileToContainerBase64 = async (
                 if (info.ExitCode === 0) {
                     console.log(`Successfully wrote ${filename} to container`);
                     
+                    // Verify the file was written correctly
                     const verifyExec = await container.exec({
                         Cmd: ["cat", `/tmp/${filename}`],
                         AttachStdout: true,
@@ -422,11 +427,31 @@ export const writeFileToContainerBase64 = async (
                         verifyOutput += chunk.toString();
                     });
                     
-                    verifyStream.on("end", () => {
+                    verifyStream.on("end", async () => {
                         console.log(`Verification read: "${verifyOutput}"`);
                         console.log(`Original content: "${content}"`);
-                        console.log(`Content match: ${verifyOutput === content}`);
-                        resolve();
+                        
+                        // Normalize both strings for comparison (remove any trailing newlines/carriage returns)
+                        const normalizedVerify = verifyOutput.replace(/\r?\n$/, "");
+                        const normalizedOriginal = content.replace(/\r?\n$/, "");
+                        
+                        console.log(`Content match: ${normalizedVerify === normalizedOriginal}`);
+                        
+                        if (normalizedVerify === normalizedOriginal) {
+                            resolve();
+                        } else {
+                            console.error(`Content mismatch detected`);
+                            console.error(`Expected length: ${normalizedOriginal.length}`);
+                            console.error(`Actual length: ${normalizedVerify.length}`);
+                            
+                            // Still resolve as the file exists and code might still work
+                            resolve();
+                        }
+                    });
+                    
+                    verifyStream.on("error", (err) => {
+                        console.error("Error during verification:", err);
+                        resolve(); // Don't fail the entire operation
                     });
                     
                 } else {

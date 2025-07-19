@@ -60,91 +60,72 @@ export const setupWebSocketServer = (server: HTTPServer) => {
              console.log("🧹 Starting cleanup process...");
     
             try {
-                // Clear timeout first
                 if (session.timeout) {
                     clearTimeout(session.timeout);
-                    console.log("✅ Timeout cleared");
+                    console.log("Timeout cleared");
                 }
-                
-                // Handle exec stream cleanup
+
                 if (session.execStream) {
                     try {
-                        console.log("🔄 Destroying exec stream...");
+                        console.log("Destroying exec stream...");
                         session.execStream.destroy();
-                        console.log("✅ Exec stream destroyed");
+                        console.log("Exec stream destroyed");
                     } catch (error) {
-                        console.error("❌ Error destroying exec stream:", error);
+                        console.error("Error destroying exec stream:", error);
                     }
                 }
                 
-                // Handle container cleanup with better error handling
-                // Handle container cleanup with aggressive strategy
                 if (session.pooledContainer && containerPool) {
-                    // Since we know the container gets marked as not in use,
-                    // but the release method hangs, let's try a different approach
-                    
-                    console.log(`🔄 Releasing container for ${session.language}...`);
-                    
+                    console.log(`Releasing container for ${session.language}...`);
                     try {
-                        // First try force release immediately if the container is already not in use
                         if (session.pooledContainer.inUse === false) {
                             console.log("Container already marked as not in use, using force release");
                             await containerPool.forceRelease(session.pooledContainer);
-                            console.log(`✅ Container force-released for ${session.language}`);
+                            console.log(`Container force-released for ${session.language}`);
                         } else {
-                            // Try normal release with very short timeout
                             const releasePromise = containerPool.release(session.pooledContainer);
                             const shortTimeout = new Promise((_, reject) => 
                                 setTimeout(() => reject(new Error('Release timeout (1s)')), 1000)
                             );
-                            
                             try {
                                 await Promise.race([releasePromise, shortTimeout]);
-                                console.log(`✅ Container released normally for ${session.language}`);
+                                console.log(`Container released normally for ${session.language}`);
                             } catch (timeoutError) {
                                 console.log("Normal release timed out, using force release");
                                 await containerPool.forceRelease(session.pooledContainer);
-                                console.log(`✅ Container force-released for ${session.language}`);
+                                console.log(`Container force-released for ${session.language}`);
                             }
                         }
-                        
                     } catch (error) {
-                        console.error("❌ All release methods failed:", error);
-                        
-                        // Nuclear option: directly manipulate the pool
+                        console.error("All release methods failed:", error);
                         try {
                             const language = session.pooledContainer.language;
                             const pools = await containerPool.getPools();
                             const pool = pools.get?.(language);
                             if (pool) {
-                                // Find and mark the container as available
                                 const containerIndex = pool.findIndex(
                                     (pc: any) => pc.container.id === session.pooledContainer.container.id
                                 );
                                 if (containerIndex !== -1) {
                                     pool[containerIndex].inUse = false;
                                     pool[containerIndex].lastUsed = Date.now();
-                                    console.log("✅ Directly marked container as available in pool");
+                                    console.log("Directly marked container as available in pool");
                                 }
                             }
                         } catch (nuclearError) {
-                            console.error("❌ Nuclear cleanup failed:", nuclearError);
-                            console.log("⚠️  Container may be in inconsistent state, but continuing...");
+                            console.error("Nuclear cleanup failed:", nuclearError);
+                            console.log("Container may be in inconsistent state, but continuing...");
                         }
                     }
                 }
                 
-                // Reset session state
                 session.isRunning = false;
                 session.pooledContainer = undefined;
                 session.execStream = undefined;
                 session.language = undefined;
-                
-                console.log("✅ Session cleanup completed successfully");
-                
+                console.log("Session cleanup completed successfully");
             } catch (error) {
-                console.error("❌ Fatal error during cleanup:", error);
-                // Force reset session state even if cleanup failed
+                console.error("Fatal error during cleanup:", error);
                 session.isRunning = false;
                 session.pooledContainer = undefined;
                 session.execStream = undefined;

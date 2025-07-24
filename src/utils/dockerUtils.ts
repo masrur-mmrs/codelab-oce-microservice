@@ -148,7 +148,7 @@ export const createSecureContainer = async (
                 { Name: "nproc", Soft: 50, Hard: 50 },
             ],
         },
-        User: "1000:1000",
+        User: "root",
         Env: [
             "PATH=/usr/local/bin:/usr/bin:/bin",
             "HOME=/tmp"
@@ -224,7 +224,12 @@ export const getLanguageConfig = (language: string) => {
         rust: {
             image: "rust:latest",
             fileName: "main.rs",
-            cmd: ["/bin/sh", "-c", "rustc -O /tmp/main.rs -o /tmp/app && /tmp/app"],
+            // More robust command that sets up the environment properly
+            cmd: [
+                "/bin/bash", 
+                "-c", 
+                "export PATH=/usr/local/cargo/bin:$PATH && export RUSTUP_HOME=/usr/local/rustup && export CARGO_HOME=/usr/local/cargo && rustc --version && rustc -O /tmp/main.rs -o /tmp/app && /tmp/app"
+            ],
             timeout: 60000,
             extensions: [".rs"],
             description: "Rust with standard library"
@@ -474,4 +479,48 @@ export const writeFileToContainerBase64 = async (
         
         stream.on("error", reject);
     });
+};
+
+export const debugRustContainer = async (docker: Docker): Promise<void> => {
+    console.log("Debugging Rust container setup...");
+    
+    try {
+        const container = await docker.createContainer({
+            Image: "rust:latest",
+            Cmd: ["/bin/bash"],
+            Tty: true,
+            OpenStdin: true,
+            AttachStdin: true,
+            AttachStdout: true,
+            AttachStderr: true,
+            WorkingDir: "/tmp",
+            User: "root"
+        });
+
+        await container.start();
+
+        const pathResult = await execInContainer(container, ["echo", "$PATH"]);
+        console.log("PATH:", pathResult.output);
+
+        const whichResult = await execInContainer(container, ["which", "rustc"]);
+        console.log("which rustc:", whichResult.output);
+
+        const versionResult = await execInContainer(container, ["rustc", "--version"]);
+        console.log("rustc --version:", versionResult.output);
+
+        const cargoResult = await execInContainer(container, ["ls", "-la", "/usr/local/cargo/bin/"]);
+        console.log("/usr/local/cargo/bin/:", cargoResult.output);
+
+        const rustupResult = await execInContainer(container, ["ls", "-la", "/usr/local/rustup/"]);
+        console.log("/usr/local/rustup/:", rustupResult.output);
+
+        const envResult = await execInContainer(container, ["env"]);
+        console.log("Environment variables:", envResult.output);
+
+        await container.stop();
+        await container.remove();
+
+    } catch (error) {
+        console.error("Debug failed:", error);
+    }
 };

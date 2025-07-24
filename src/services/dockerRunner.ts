@@ -16,7 +16,6 @@ interface RunResult {
     executionTime: number;
 }
 
-
 export const initializeContainerPool = async (): Promise<void> => {
     if (containerPool) {
         return;
@@ -32,10 +31,14 @@ export const initializeContainerPool = async (): Promise<void> => {
     });
     
     await containerPool.preloadImages();
-    
     await containerPool.initializePools();
     
     console.log("Container pool system initialized successfully!");
+};
+
+// Export function to get shared container pool
+export const getSharedContainerPool = (): ContainerPool | null => {
+    return containerPool;
 };
 
 export const getPoolStats = (): Record<string, any> => {
@@ -91,41 +94,12 @@ export const runCodeInDocker = async (
 
         console.log("[DEBUG] Archive uploaded successfully");
 
-        const catExec = await container.exec({
-            Cmd: ["cat", `/tmp/${config.fileName}`],
-            AttachStdout: true,
-            AttachStderr: true,
-        });
-        const catStream = await catExec.start({});
-        catStream.on("data", (chunk: { toString: () => any; }) => {
-            console.log(`📝 Content inside container /tmp/${config.fileName}:`, chunk.toString());
-        });
-        
-        await execInContainer(container, ["touch", "/tmp/hello.txt"]);
-        await execInContainer(container, ["ls", "-lh", "/tmp"]);
-
         const { output: lsOutput } = await execInContainer(container, ["ls", "-lh", "/tmp"]);
         console.log("[DEBUG] /tmp contents:", lsOutput);
-
 
         if (!lsOutput.includes(config.fileName)) {
             throw new Error(`File ${config.fileName} not found in container after upload`);
         }
-
-        console.log("🧪 Running:", config.cmd.join(" "));
-
-        await execInContainer(container, ["ls", "-lh", "/tmp"]);
-
-        const debugExec = await container.exec({
-            Cmd: ["ls", "-l", "/tmp"],
-            AttachStdout: true,
-            AttachStderr: true
-        });
-        const debugStream = await debugExec.start();
-
-        debugStream.on("data", (chunk: { toString: () => any; }) => {
-            console.log("[/tmp contents]", chunk.toString());
-        });
 
         console.log("🧪 Running:", config.cmd.join(" "));
 
@@ -247,15 +221,9 @@ export const createInteractiveContainer = async (
         fs.mkdirSync(tempDir, { recursive: true });
     }
     
-    const tempFile = path.join(tempDir, `${config.fileName}`);
-
-    if (!fs.existsSync(tempFile)) {
-        throw new Error(`Code file not found: ${tempFile}`);
-    }
-
-    console.log("[DEBUG] Putting archive to /tmp");
+    console.log("[DEBUG] Writing file to container");
     await writeFileToContainerBase64(container, config.fileName, code);
-    console.log("[DEBUG] Archive put complete");
+    console.log("[DEBUG] File write complete");
 
     const { output: lsOutput } = await execInContainer(container, ["ls", "-l", "/tmp"]);
     console.log("[DEBUG] /tmp contents:", lsOutput);
@@ -263,17 +231,6 @@ export const createInteractiveContainer = async (
     if (!lsOutput.includes(config.fileName)) {
         throw new Error(`File ${config.fileName} not found in container after upload`);
     }
-
-    const debugExec = await container.exec({
-        Cmd: ["ls", "-l", "/tmp"],
-        AttachStdout: true,
-        AttachStderr: true
-    });
-    const debugStream = await debugExec.start({});
-
-    debugStream.on("data", (chunk: Buffer) => {
-        console.log("[/tmp contents]", chunk.toString());
-    });
 
     console.log("🧪 Running:", config.cmd.join(" "));
 
@@ -291,12 +248,6 @@ export const createInteractiveContainer = async (
     pooledContainer.execStream = execStream;
 
     const cleanup = async () => {
-        try {
-            fs.unlinkSync(tempFile);
-        } catch (error) {
-            console.warn("Failed to cleanup temp file:", error);
-        }
-        
         if (execStream) {
             try {
                 execStream.destroy();

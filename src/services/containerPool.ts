@@ -1,6 +1,6 @@
 import Docker from "dockerode";
 import { EventEmitter } from "events";
-import { getLanguageConfig, ensureImageExists } from "../utils/dockerUtils";
+import { getLanguageConfig, ensureImageExists, execInContainer } from "../utils/dockerUtils";
 
 interface PooledContainer {
     container: Docker.Container;
@@ -160,6 +160,29 @@ export class ContainerPool extends EventEmitter {
             throw new Error(`Unsupported language: ${language}`);
         }
 
+        // Set up environment variables based on language
+        let envVars = [
+            "PATH=/usr/local/bin:/usr/bin:/bin",
+            "HOME=/tmp"
+        ];
+
+        // Special environment setup for different languages
+        if (language === 'rust') {
+            envVars = [
+                "PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin",
+                "CARGO_HOME=/usr/local/cargo",
+                "RUSTUP_HOME=/usr/local/rustup",
+                "HOME=/tmp"
+            ];
+        } else if (language === 'go') {
+            envVars = [
+                "PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin",
+                "GOPATH=/tmp/go",
+                "GOCACHE=/tmp/.cache/go-build",
+                "HOME=/tmp"
+            ];
+        }
+
         const options: ExtendedContainerCreateOptions = {
             Image: config.image,
             Platform: "linux/amd64",
@@ -181,14 +204,37 @@ export class ContainerPool extends EventEmitter {
                 CapDrop: ["ALL"],
                 PidsLimit: 50,
             },
-            User: "1000:1000",
-            Env: [
-                "PATH=/usr/local/bin:/usr/bin:/bin",
-                "HOME=/tmp"
-            ]
-        }
+            User: "root",
+            Env: envVars
+        };
 
         const container = await this.docker.createContainer(options);
+
+        // Start the container first, then test if needed
+        await container.start();
+
+        // Test Rust installation after container is started
+        if (language === "rust") {
+            try {
+                const { output, exitCode } = await execInContainer(container, ["rustc", "--version"]);
+                if (exitCode === 0) {
+                    console.log(`Rust version in container: ${output.trim()}`);
+                } else {
+                    console.error(`Rust not available in container. Exit code: ${exitCode}`);
+                }
+            } catch (error) {
+                console.error(`Failed to check Rust version:`, error);
+                // Try alternative command with explicit PATH
+                try {
+                    const { output: pathOutput } = await execInContainer(container, 
+                        ["/bin/bash", "-c", "export PATH=/usr/local/cargo/bin:$PATH && rustc --version"]
+                    );
+                    console.log(`Rust version (with PATH): ${pathOutput.trim()}`);
+                } catch (pathError) {
+                    console.error(`Rust still not found with explicit PATH:`, pathError);
+                }
+            }
+        }
 
         const now = Date.now();
         return {
@@ -224,6 +270,8 @@ export class ContainerPool extends EventEmitter {
                 await available.container.start();
             }
         } catch (error) {
+            console.warn(`Container inspection/start failed, creating new one:`, error);
+            // Create a new container if the existing one is problematic
             available = await this.createContainer(language);
             available.inUse = true;
             available.lastUsed = Date.now();
@@ -235,8 +283,6 @@ export class ContainerPool extends EventEmitter {
                 pool.push(available);
             }
             this.pools.set(language, pool);
-            
-            await available.container.start();
         }
 
         return available;
@@ -255,6 +301,7 @@ export class ContainerPool extends EventEmitter {
             pooledContainer.execStream = undefined;
         }
 
+        // Clean up container workspace
         try {
             const resetExec = await pooledContainer.container.exec({
                 Cmd: ["/bin/sh", "-c", "cd /tmp && rm -rf * && exit"],
@@ -266,6 +313,8 @@ export class ContainerPool extends EventEmitter {
             await new Promise<void>((resolve) => {
                 resetStream.on("end", resolve);
                 resetStream.on("error", resolve);
+                // Add timeout to prevent hanging
+                setTimeout(resolve, 5000);
             });
         } catch (error) {
             console.warn("Failed to reset container state:", error);
@@ -290,6 +339,7 @@ export class ContainerPool extends EventEmitter {
                 }
             }
             
+            // Remove containers marked for cleanup
             for (let i = toRemove.length - 1; i >= 0; i--) {
                 const index = toRemove[i];
                 const container = pool[index];
@@ -303,6 +353,7 @@ export class ContainerPool extends EventEmitter {
                 }
             }
             
+            // Maintain minimum pool size
             if (pool.length < this.config.minSize) {
                 await this.warmUpPool(language);
             }
@@ -319,14 +370,13 @@ export class ContainerPool extends EventEmitter {
         }
         
         try {
-            await pooledContainer.container.stop();
+            await pooledContainer.container.stop({ t: 5 });
         } catch (error) {
-            // Container might already be stopped
-            console.warn("Failed to stop container:", error);
+            console.warn("Failed to stop container (might already be stopped):", error);
         }
         
         try {
-            await pooledContainer.container.remove();
+            await pooledContainer.container.remove({ force: true });
         } catch (error) {
             console.warn("Failed to remove container:", error);
         }
@@ -346,9 +396,9 @@ export class ContainerPool extends EventEmitter {
         return {
             pools: stats,
             preloadedImages: Array.from(this.preloadedImages),
+            config: this.config
         };
     }
-
 
     async shutdown(): Promise<void> {
         console.log("Shutting down container pool...");

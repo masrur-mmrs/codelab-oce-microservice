@@ -1,7 +1,7 @@
 import express from "express";
 import http from "http";
 import executeRoute from "./api/routes/execute";
-import { setupWebSocketServer, initializeWebSocketPool, shutdownWebSocketPool } from "./websocket/wsServer";
+import { setupWebSocketServer, shutdownWebSocketPool } from "./websocket/wsServer";
 import { initializeContainerPool, shutdownContainerPool } from "./services/dockerRunner";
 
 const app = express();
@@ -40,20 +40,18 @@ process.on('unhandledRejection', (reason, promise) => {
     gracefulShutdown('unhandledRejection');
 });
 
-
 const initializeApp = async () => {
     try {
         console.log('Starting Codelabs OCE Microservice...');
         
-
-        console.log('Initializing container pools...');
+        // Initialize only ONE container pool system
+        console.log('Initializing container pool system...');
         await initializeContainerPool();
-        await initializeWebSocketPool();
         
         app.use(express.json());
-        
         app.use("/api", executeRoute);
         
+        // Setup WebSocket server (but don't initialize another pool)
         setupWebSocketServer(server);
         
         app.get('/health', (req, res) => {
@@ -67,11 +65,9 @@ const initializeApp = async () => {
         app.get('/stats', async (req, res) => {
             try {
                 const { getPoolStats } = await import('./services/dockerRunner');
-                const { getWebSocketPoolStats } = await import('./websocket/wsServer');
                 
                 const stats = {
-                    dockerRunner: getPoolStats(),
-                    webSocket: getWebSocketPoolStats(),
+                    containerPool: getPoolStats(),
                     system: {
                         uptime: process.uptime(),
                         memory: process.memoryUsage(),

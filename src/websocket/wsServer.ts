@@ -1,15 +1,11 @@
 import { WebSocketServer } from "ws";
 import { Server as HTTPServer } from "http";
 import stream from "stream";
-import fs from "fs";
-import path from "path";
-import { ContainerPool } from "../services/containerPool";
 import { getLanguageConfig, writeFileToContainerBase64 } from "../utils/dockerUtils";
+import { getSharedContainerPool } from "../services/dockerRunner"; // Import shared pool
 import Docker from "dockerode";
 
 const docker = new Docker();
-
-let containerPool: ContainerPool | null = null;
 
 interface ClientSession {
     pooledContainer?: any;
@@ -18,22 +14,6 @@ interface ClientSession {
     language?: string;
     timeout?: NodeJS.Timeout;
 }
-
-export const initializeWebSocketPool = async (): Promise<void> => {
-    if (containerPool) {
-        return;
-    }
-    
-    containerPool = new ContainerPool(docker, {
-        minSize: 3,
-        maxSize: 15,
-        maxAge: 45 * 60 * 1000,
-        maxIdleTime: 15 * 60 * 1000,
-    });
-    
-    await containerPool.preloadImages();
-    await containerPool.initializePools();
-};
 
 export const setupWebSocketServer = (server: HTTPServer) => {
     const wss = new WebSocketServer({ server });
@@ -57,7 +37,7 @@ export const setupWebSocketServer = (server: HTTPServer) => {
         activeSessions.add(session);
 
         const cleanup = async () => {
-             console.log("Starting cleanup process...");
+            console.log("Starting cleanup process...");
     
             try {
                 if (session.timeout) {
@@ -72,38 +52,18 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                     }
                 }
                 
-                if (session.pooledContainer && containerPool) {
-                    try {
-                        if (session.pooledContainer.inUse === false) {
-                            await containerPool.forceRelease(session.pooledContainer);
-                        } else {
-                            const releasePromise = containerPool.release(session.pooledContainer);
-                            const shortTimeout = new Promise((_, reject) => 
-                                setTimeout(() => reject(new Error('Release timeout (1s)')), 1000)
-                            );
-                            try {
-                                await Promise.race([releasePromise, shortTimeout]);
-                            } catch (timeoutError) {
-                                await containerPool.forceRelease(session.pooledContainer);
-                            }
-                        }
-                    } catch (error) {
+                if (session.pooledContainer) {
+                    const containerPool = getSharedContainerPool();
+                    if (containerPool) {
                         try {
-                            const language = session.pooledContainer.language;
-                            const pools = await containerPool.getPools();
-                            const pool = pools.get?.(language);
-                            if (pool) {
-                                const containerIndex = pool.findIndex(
-                                    (pc: any) => pc.container.id === session.pooledContainer.container.id
-                                );
-                                if (containerIndex !== -1) {
-                                    pool[containerIndex].inUse = false;
-                                    pool[containerIndex].lastUsed = Date.now();
-                                }
+                            await containerPool.release(session.pooledContainer);
+                        } catch (error) {
+                            console.error("Error releasing container:", error);
+                            try {
+                                await containerPool.forceRelease(session.pooledContainer);
+                            } catch (forceError) {
+                                console.error("Error force releasing container:", forceError);
                             }
-                        } catch (nuclearError) {
-                            console.error("Nuclear cleanup failed:", nuclearError);
-                            console.log("Container may be in inconsistent state, but continuing...");
                         }
                     }
                 }
@@ -129,16 +89,14 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                 const data = JSON.parse(raw.toString());
                 
                 if (data.type === "execute") {
-                    const { 
-                        language, 
-                        code 
-                    } = data;
+                    const { language, code } = data;
                     
                     if (session.isRunning) {
                         sendMessage("A code execution is already in progress", "system");
                         return;
                     }
 
+                    const containerPool = getSharedContainerPool();
                     if (!containerPool) {
                         sendMessage("Container pool not initialized", "system");
                         return;
@@ -159,16 +117,6 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                         
                         sendMessage(`Acquired container for ${language}\n`, "system");
 
-                        const tempDir = path.join(process.cwd(), "tmp");
-                        if (!fs.existsSync(tempDir)) {
-                            fs.mkdirSync(tempDir, { recursive: true });
-                        }
-                        
-                        console.log(`Creating TAR archive for ${config.fileName}`);
-
-                        console.log(`Writing ${config.fileName} directly to container`);
-                        console.log(`Code content length: ${code.length} characters`);
-
                         try {
                             await writeFileToContainerBase64(container, config.fileName, code);
                             console.log("File successfully written to container");
@@ -179,6 +127,7 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                             return;
                         }
 
+                        // Verify file exists
                         const verifyExec = await container.exec({
                             Cmd: ["ls", "-la", "/tmp"],
                             AttachStdout: true,
@@ -190,78 +139,16 @@ export const setupWebSocketServer = (server: HTTPServer) => {
 
                         verifyStream.on("data", (chunk: Buffer) => {
                             verifyOutput += chunk.toString();
-                            console.log("📁 /tmp contents:", chunk.toString());
                         });
 
                         verifyStream.on("end", async () => {
-                            console.log("Full /tmp contents:", verifyOutput);
-                            
                             if (!verifyOutput.includes(config.fileName)) {
                                 sendMessage(`Error: ${config.fileName} not found in /tmp after upload`, "system");
-                                console.error("File not found in container after upload");
                                 await cleanup();
                                 return;
                             }
 
-                            const catExec = await container.exec({
-                                Cmd: ["cat", `/tmp/${config.fileName}`],
-                                AttachStdout: true,
-                                AttachStderr: true,
-                            });
-
-                            const catStream = await catExec.start({});
-                            let catOutput = "";
-
-                            catStream.on("data", (chunk: Buffer) => {
-                                catOutput += chunk.toString();
-                            });
-
-                            catStream.on("end", async () => {
-                                console.log(`📝 Content inside container /tmp/${config.fileName}:`, catOutput);
-                                
-                                const normalizedContainerContent = catOutput
-                                // .trim().replace(/\r\n/g, '\n');
-                                const normalizedOriginalCode = code.trim()
-                                // .replace(/\r\n/g, '\n');
-                                
-                                console.log(`🔍 Original code length: ${normalizedOriginalCode.length}`);
-                                console.log(`🔍 Container content length: ${normalizedContainerContent.length}`);
-                                console.log(`🔍 Original code: "${normalizedOriginalCode}"`);
-                                console.log(`🔍 Container content: "${normalizedContainerContent}"`);
-                                
-                                if (normalizedContainerContent === normalizedOriginalCode) {
-                                    console.log("File content matches expected code");
-                                    // Proceed with execution...
-                                    await executeCode();
-                                } else {
-                                    console.error("File content doesn't match expected code");
-                                    console.error(`Expected: "${normalizedOriginalCode}"`);
-                                    console.error(`Got: "${normalizedContainerContent}"`);
-                                    
-                                    // Show byte-by-byte comparison for debugging
-                                    console.log("Byte comparison:");
-                                    for (let i = 0; i < Math.max(normalizedOriginalCode.length, normalizedContainerContent.length); i++) {
-                                        const expectedChar = normalizedOriginalCode[i] || "END";
-                                        const actualChar = normalizedContainerContent[i] || "END";
-                                        // const expectedCode = normalizedOriginalCode.charCodeAt(i) || "END";
-                                        // const actualCode = normalizedContainerContent.charCodeAt(i) || "END";
-                                        
-                                        if (expectedChar !== actualChar) {
-                                            // console.log(`Diff at position ${i}: expected "${expectedChar}" (${expectedCode}) vs actual "${actualChar}" (${actualCode})`);
-                                        }
-                                    }
-                                    
-                                    // For now, let"s proceed with execution anyway since the file exists
-                                    console.log("Proceeding with execution despite content mismatch...");
-                                    await executeCode();
-                                }
-                            });
-
-                            catStream.on("error", async (err: { message: any; }) => {
-                                console.error("Error reading file content:", err);
-                                sendMessage(`Error reading file: ${err.message}`, "system");
-                                // await cleanup();
-                            });
+                            await executeCode();
                         });
 
                         const executeCode = async () => {
@@ -303,11 +190,8 @@ export const setupWebSocketServer = (server: HTTPServer) => {
 
                                 session.execStream.on("end", async () => {
                                     sendMessage("Execution completed", "system");
-                                    try {
-                                        // await cleanup();
-                                    } catch (error) {
-                                        sendMessage("Cleanup failed: " + error, "system");
-                                    }
+                                    session.isRunning = false;
+                                    // Don't cleanup here - let the user decide when to cleanup
                                 });
 
                                 session.execStream.on("error", async (err: Error) => {
@@ -322,7 +206,7 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                                 sendMessage(`Execution setup error: ${error}`, "system");
                                 await cleanup();
                             }
-                        }
+                        };
 
                     } catch (err: any) {
                         sendMessage(`Error: ${err.message}`, "system");
@@ -344,6 +228,7 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                         await cleanup();
                     }
                 } else if (data.type === "stats") {
+                    const containerPool = getSharedContainerPool();
                     if (containerPool) {
                         const stats = containerPool.getStats();
                         sendMessage(JSON.stringify(stats, null, 2), "system");
@@ -359,11 +244,13 @@ export const setupWebSocketServer = (server: HTTPServer) => {
         ws.on("close", async () => {
             console.log("WebSocket client disconnected");
             await cleanup();
+            activeSessions.delete(session);
         });
 
         ws.on("error", async (error) => {
             console.error("WebSocket error:", error);
             await cleanup();
+            activeSessions.delete(session);
         });
     });
 
@@ -371,6 +258,7 @@ export const setupWebSocketServer = (server: HTTPServer) => {
 };
 
 export const getWebSocketPoolStats = (): Record<string, any> => {
+    const containerPool = getSharedContainerPool();
     if (!containerPool) {
         return { error: "Container pool not initialized" };
     }
@@ -379,8 +267,6 @@ export const getWebSocketPoolStats = (): Record<string, any> => {
 };
 
 export const shutdownWebSocketPool = async (): Promise<void> => {
-    if (containerPool) {
-        await containerPool.shutdown();
-        containerPool = null;
-    }
+    // WebSocket server now uses shared pool, so no separate shutdown needed
+    console.log("WebSocket server shutdown - using shared container pool");
 };

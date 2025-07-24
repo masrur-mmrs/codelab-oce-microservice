@@ -57,31 +57,25 @@ export const setupWebSocketServer = (server: HTTPServer) => {
         activeSessions.add(session);
 
         const cleanup = async () => {
-             console.log("🧹 Starting cleanup process...");
+             console.log("Starting cleanup process...");
     
             try {
                 if (session.timeout) {
                     clearTimeout(session.timeout);
-                    console.log("Timeout cleared");
                 }
 
                 if (session.execStream) {
                     try {
-                        console.log("Destroying exec stream...");
                         session.execStream.destroy();
-                        console.log("Exec stream destroyed");
                     } catch (error) {
                         console.error("Error destroying exec stream:", error);
                     }
                 }
                 
                 if (session.pooledContainer && containerPool) {
-                    console.log(`Releasing container for ${session.language}...`);
                     try {
                         if (session.pooledContainer.inUse === false) {
-                            console.log("Container already marked as not in use, using force release");
                             await containerPool.forceRelease(session.pooledContainer);
-                            console.log(`Container force-released for ${session.language}`);
                         } else {
                             const releasePromise = containerPool.release(session.pooledContainer);
                             const shortTimeout = new Promise((_, reject) => 
@@ -89,15 +83,11 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                             );
                             try {
                                 await Promise.race([releasePromise, shortTimeout]);
-                                console.log(`Container released normally for ${session.language}`);
                             } catch (timeoutError) {
-                                console.log("Normal release timed out, using force release");
                                 await containerPool.forceRelease(session.pooledContainer);
-                                console.log(`Container force-released for ${session.language}`);
                             }
                         }
                     } catch (error) {
-                        console.error("All release methods failed:", error);
                         try {
                             const language = session.pooledContainer.language;
                             const pools = await containerPool.getPools();
@@ -109,7 +99,6 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                                 if (containerIndex !== -1) {
                                     pool[containerIndex].inUse = false;
                                     pool[containerIndex].lastUsed = Date.now();
-                                    console.log("Directly marked container as available in pool");
                                 }
                             }
                         } catch (nuclearError) {
@@ -268,10 +257,10 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                                 }
                             });
 
-                            catStream.on("error", (err: { message: any; }) => {
+                            catStream.on("error", async (err: { message: any; }) => {
                                 console.error("Error reading file content:", err);
                                 sendMessage(`Error reading file: ${err.message}`, "system");
-                                cleanup();
+                                // await cleanup();
                             });
                         });
 
@@ -308,14 +297,14 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                                 docker.modem.demuxStream(session.execStream, stdout, stderr);
 
                                 session.timeout = setTimeout(async () => {
-                                    sendMessage("Execution timed out (30 seconds)", "system");
+                                    sendMessage("Execution timed out (5 minutes)", "system");
                                     await cleanup();
-                                }, 30000);
+                                }, 300000);
 
                                 session.execStream.on("end", async () => {
                                     sendMessage("Execution completed", "system");
                                     try {
-                                        await cleanup();
+                                        // await cleanup();
                                     } catch (error) {
                                         sendMessage("Cleanup failed: " + error, "system");
                                     }

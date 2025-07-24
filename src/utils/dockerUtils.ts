@@ -2,6 +2,10 @@ import Docker from "dockerode";
 import tar from "tar-stream";
 import { Readable } from "stream";
 
+interface ExtendedContainerCreateOptions extends Docker.ContainerCreateOptions {
+    Platform?: string;
+}
+
 export const ensureImageExists = async (docker: Docker, imageName: string): Promise<void> => {
     try {
         await docker.getImage(imageName).inspect();
@@ -14,10 +18,16 @@ export const ensureImageExists = async (docker: Docker, imageName: string): Prom
 
 export const pullImage = async (docker: Docker, imageName: string): Promise<void> => {
     return new Promise((resolve, reject) => {
-        docker.pull(imageName, (err: any, stream: NodeJS.ReadableStream) => {
+        docker.pull(imageName, {platform: 'linux/amd64'}, (err: any, stream?: any) => {
             if (err) {
                 console.error(`Failed to pull image ${imageName}:`, err);
                 return reject(err);
+            }
+
+            if (!stream) {
+                const errorMsg = `No stream returned when pulling image ${imageName}`;
+                console.error(errorMsg);
+                return reject(new Error(errorMsg));
             }
 
             const onFinished = (err: any) => {
@@ -112,8 +122,9 @@ export const createSecureContainer = async (
     cmd: string[],
     workingDir: string = "/tmp"
 ): Promise<Docker.Container> => {
-    return await docker.createContainer({
+    const options: ExtendedContainerCreateOptions = {
         Image: image,
+        Platform: "linux/amd64",
         Cmd: cmd,
         Tty: false,
         OpenStdin: true,
@@ -129,9 +140,6 @@ export const createSecureContainer = async (
             CpuQuota: 50000,
             NetworkMode: "none",
             ReadonlyRootfs: false,
-            Tmpfs: {
-                "/tmp": "rw,noexec,nosuid,size=100m"
-            },
             SecurityOpt: ["no-new-privileges"],
             CapDrop: ["ALL"],
             PidsLimit: 50,
@@ -140,12 +148,13 @@ export const createSecureContainer = async (
                 { Name: "nproc", Soft: 50, Hard: 50 },
             ],
         },
-        User: "nobody",
+        User: "1000:1000",
         Env: [
             "PATH=/usr/local/bin:/usr/bin:/bin",
             "HOME=/tmp"
         ]
-    });
+    }
+    return await docker.createContainer(options);
 };
 
 export const validateLanguage = (language: string): boolean => {
@@ -191,18 +200,18 @@ export const getLanguageConfig = (language: string) => {
         cpp: {
             image: "gcc:latest",
             fileName: "main.cpp",
-            cmd: ["/bin/sh", "-c", "g++ -std=c++17 -Wall -Wextra -O2 /tmp/main.cpp -o /tmp/app && /tmp/app"],
+            cmd: ["/bin/sh", "-c", "g++ -std=c++20 -Wall -Wextra -O2 /tmp/main.cpp -o /tmp/app && /tmp/app"],
             timeout: 45000,
             extensions: [".cpp", ".cc", ".cxx"],
-            description: "GCC with C++17 standard"
+            description: "GCC with C++20 standard"
         },
         java: {
-            image: "openjdk:11-slim",
+            image: "openjdk:21",
             fileName: "Main.java",
             cmd: ["/bin/sh", "-c", "javac /tmp/Main.java && java -cp /tmp Main"],
             timeout: 45000,
             extensions: [".java"],
-            description: "OpenJDK 11"
+            description: "OpenJDK 21"
         },
         go: {
             image: "golang:1.19-alpine",

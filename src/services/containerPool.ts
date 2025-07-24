@@ -18,6 +18,10 @@ interface PoolConfig {
     maxIdleTime: number;
 }
 
+interface ExtendedContainerCreateOptions extends Docker.ContainerCreateOptions {
+    Platform?: string;
+}
+
 export class ContainerPool extends EventEmitter {
     private docker: Docker;
     private pools: Map<string, PooledContainer[]> = new Map();
@@ -47,7 +51,6 @@ export class ContainerPool extends EventEmitter {
         return this.pools;
     }
 
-    // Add this method to your ContainerPool class
     public async forceRelease(pooledContainer: any): Promise<void> {
         try {
             const language = pooledContainer.language;
@@ -58,36 +61,30 @@ export class ContainerPool extends EventEmitter {
                 return;
             }
             
-            // Find the container in the pool
             const containerIndex = pool.findIndex(
                 (pc: any) => pc.container.id === pooledContainer.container.id && !pc.inUse
             );
             
             if (containerIndex !== -1) {
-                // Container is already available, just mark it properly
                 pool[containerIndex].inUse = false;
                 pool[containerIndex].lastUsed = Date.now();
                 console.log(`Container already in available pool, marked as free`);
                 return;
             }
             
-            // Check if it's in use
             const inUseIndex = pool.findIndex(
                 (pc: any) => pc.container.id === pooledContainer.container.id && pc.inUse
             );
             
             if (inUseIndex !== -1) {
-                // Mark as not in use
                 pool[inUseIndex].inUse = false;
                 pool[inUseIndex].lastUsed = Date.now();
                 console.log(`Moved container from inUse to available pool`);
                 return;
             }
             
-            // Container not found in pool - this is problematic
             console.error(`Container not found in any pool, it may be leaked`);
             
-            // Optionally, try to stop/remove the container entirely
             try {
                 await pooledContainer.container.stop({ t: 1 });
                 await pooledContainer.container.remove({ force: true });
@@ -113,7 +110,7 @@ export class ContainerPool extends EventEmitter {
                 if (config) {
                     await ensureImageExists(this.docker, config.image);
                     this.preloadedImages.add(config.image);
-                    console.log(`✅ Image ${config.image} preloaded for ${language}`);
+                    console.log(`Image ${config.image} preloaded for ${language}`);
                 }
             } catch (error) {
                 console.error(`Failed to preload image for ${language}:`, error);
@@ -163,8 +160,9 @@ export class ContainerPool extends EventEmitter {
             throw new Error(`Unsupported language: ${language}`);
         }
 
-        const container = await this.docker.createContainer({
+        const options: ExtendedContainerCreateOptions = {
             Image: config.image,
+            Platform: "linux/amd64",
             Cmd: ["/bin/sh"],
             Tty: true,
             OpenStdin: true,
@@ -179,19 +177,18 @@ export class ContainerPool extends EventEmitter {
                 CpuQuota: 50000,
                 NetworkMode: "none",
                 ReadonlyRootfs: false,
-                Tmpfs: {
-                    "/tmp": "rw,noexec,nosuid,size=100m"
-                },
                 SecurityOpt: ["no-new-privileges"],
                 CapDrop: ["ALL"],
                 PidsLimit: 50,
             },
-            User: "nobody",
+            User: "1000:1000",
             Env: [
                 "PATH=/usr/local/bin:/usr/bin:/bin",
                 "HOME=/tmp"
             ]
-        });
+        }
+
+        const container = await this.docker.createContainer(options);
 
         const now = Date.now();
         return {
@@ -300,7 +297,7 @@ export class ContainerPool extends EventEmitter {
                 try {
                     await this.destroyContainer(container);
                     pool.splice(index, 1);
-                    console.log(`🗑️ Cleaned up container for ${language}`);
+                    console.log(`Cleaned up container for ${language}`);
                 } catch (error) {
                     console.error(`Failed to cleanup container for ${language}:`, error);
                 }

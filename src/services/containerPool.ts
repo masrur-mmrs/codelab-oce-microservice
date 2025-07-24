@@ -160,13 +160,11 @@ export class ContainerPool extends EventEmitter {
             throw new Error(`Unsupported language: ${language}`);
         }
 
-        // Set up environment variables based on language
         let envVars = [
             "PATH=/usr/local/bin:/usr/bin:/bin",
             "HOME=/tmp"
         ];
 
-        // Special environment setup for different languages
         if (language === 'rust') {
             envVars = [
                 "PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin",
@@ -210,10 +208,8 @@ export class ContainerPool extends EventEmitter {
 
         const container = await this.docker.createContainer(options);
 
-        // Start the container first, then test if needed
         await container.start();
 
-        // Test Rust installation after container is started
         if (language === "rust") {
             try {
                 const { output, exitCode } = await execInContainer(container, ["rustc", "--version"]);
@@ -224,7 +220,6 @@ export class ContainerPool extends EventEmitter {
                 }
             } catch (error) {
                 console.error(`Failed to check Rust version:`, error);
-                // Try alternative command with explicit PATH
                 try {
                     const { output: pathOutput } = await execInContainer(container, 
                         ["/bin/bash", "-c", "export PATH=/usr/local/cargo/bin:$PATH && rustc --version"]
@@ -271,7 +266,6 @@ export class ContainerPool extends EventEmitter {
             }
         } catch (error) {
             console.warn(`Container inspection/start failed, creating new one:`, error);
-            // Create a new container if the existing one is problematic
             available = await this.createContainer(language);
             available.inUse = true;
             available.lastUsed = Date.now();
@@ -301,7 +295,6 @@ export class ContainerPool extends EventEmitter {
             pooledContainer.execStream = undefined;
         }
 
-        // Clean up container workspace
         try {
             const resetExec = await pooledContainer.container.exec({
                 Cmd: ["/bin/sh", "-c", "cd /tmp && rm -rf * && exit"],
@@ -313,7 +306,6 @@ export class ContainerPool extends EventEmitter {
             await new Promise<void>((resolve) => {
                 resetStream.on("end", resolve);
                 resetStream.on("error", resolve);
-                // Add timeout to prevent hanging
                 setTimeout(resolve, 5000);
             });
         } catch (error) {
@@ -339,7 +331,6 @@ export class ContainerPool extends EventEmitter {
                 }
             }
             
-            // Remove containers marked for cleanup
             for (let i = toRemove.length - 1; i >= 0; i--) {
                 const index = toRemove[i];
                 const container = pool[index];
@@ -353,7 +344,6 @@ export class ContainerPool extends EventEmitter {
                 }
             }
             
-            // Maintain minimum pool size
             if (pool.length < this.config.minSize) {
                 await this.warmUpPool(language);
             }

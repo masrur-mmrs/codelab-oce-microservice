@@ -44,14 +44,12 @@ const initializeApp = async () => {
     try {
         console.log('Starting Codelabs OCE Microservice...');
         
-        // Initialize only ONE container pool system
         console.log('Initializing container pool system...');
         await initializeContainerPool();
         
         app.use(express.json());
         app.use("/api", executeRoute);
         
-        // Setup WebSocket server (but don't initialize another pool)
         setupWebSocketServer(server);
         
         app.get('/health', (req, res) => {

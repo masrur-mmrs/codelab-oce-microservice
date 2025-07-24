@@ -2,7 +2,7 @@ import { WebSocketServer } from "ws";
 import { Server as HTTPServer } from "http";
 import stream from "stream";
 import { getLanguageConfig, writeFileToContainerBase64 } from "../utils/dockerUtils";
-import { getSharedContainerPool } from "../services/dockerRunner"; // Import shared pool
+import { getSharedContainerPool } from "../services/dockerRunner";
 import Docker from "dockerode";
 
 const docker = new Docker();
@@ -127,7 +127,6 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                             return;
                         }
 
-                        // Verify file exists
                         const verifyExec = await container.exec({
                             Cmd: ["ls", "-la", "/tmp"],
                             AttachStdout: true,
@@ -191,7 +190,6 @@ export const setupWebSocketServer = (server: HTTPServer) => {
                                 session.execStream.on("end", async () => {
                                     sendMessage("Execution completed", "system");
                                     session.isRunning = false;
-                                    // Don't cleanup here - let the user decide when to cleanup
                                 });
 
                                 session.execStream.on("error", async (err: Error) => {
@@ -267,6 +265,5 @@ export const getWebSocketPoolStats = (): Record<string, any> => {
 };
 
 export const shutdownWebSocketPool = async (): Promise<void> => {
-    // WebSocket server now uses shared pool, so no separate shutdown needed
     console.log("WebSocket server shutdown - using shared container pool");
 };

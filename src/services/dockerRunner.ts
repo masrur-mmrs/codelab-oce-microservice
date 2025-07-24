@@ -36,7 +36,6 @@ export const initializeContainerPool = async (): Promise<void> => {
     console.log("Container pool system initialized successfully!");
 };
 
-// Export function to get shared container pool
 export const getSharedContainerPool = (): ContainerPool | null => {
     return containerPool;
 };

@@ -200,7 +200,7 @@ export class ContainerPool extends EventEmitter {
                 ReadonlyRootfs: false,
                 SecurityOpt: ["no-new-privileges"],
                 CapDrop: ["ALL"],
-                PidsLimit: 50,
+                PidsLimit: 256, // 256 PIDs limit for Go compatibility
             },
             User: "root",
             Env: envVars

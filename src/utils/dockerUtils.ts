@@ -142,10 +142,10 @@ export const createSecureContainer = async (
             ReadonlyRootfs: false,
             SecurityOpt: ["no-new-privileges"],
             CapDrop: ["ALL"],
-            PidsLimit: 50,
+            PidsLimit: 256, // 256 PIDs limit for Go compatibility
             Ulimits: [
                 { Name: "nofile", Soft: 1024, Hard: 1024 },
-                { Name: "nproc", Soft: 50, Hard: 50 },
+                { Name: "nproc", Soft: 256, Hard: 256 },
             ],
         },
         User: "root",

@@ -1,5 +1,6 @@
 import express from "express";
 import http from "http";
+import cors from "cors";
 import executeRoute from "./api/routes/execute";
 import { setupWebSocketServer, shutdownWebSocketPool } from "./websocket/wsServer";
 import { initializeContainerPool, shutdownContainerPool } from "./services/dockerRunner";
@@ -7,6 +8,24 @@ import { initializeContainerPool, shutdownContainerPool } from "./services/docke
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 4000;
+
+const corsOptions = {
+    origin: [
+        'http://localhost:3000',    // React dev server
+        'http://localhost:3001',    // Alternative React port
+        'http://localhost:5173',    // Vite dev server
+        'http://localhost:8080',    // Vue/other dev servers
+        'http://127.0.0.1:3000',    // Alternative localhost
+        'http://127.0.0.1:5173',    // Alternative localhost
+        process.env.FRONTEND_URL || 'http://localhost:3000',    // Production frontend URL
+    ],
+    credentials: true,
+    optionsSuccessStatus: 200,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
+};
+
+app.use(cors(corsOptions))
 
 const gracefulShutdown = async (signal: string) => {
     console.log(`\nReceived ${signal}. Starting graceful shutdown...`);
